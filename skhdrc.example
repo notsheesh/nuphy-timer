@@ -1,0 +1,3 @@
+# f13 (the remapped key) starts a 10 second timer; press it again to cancel.
+# Needs skhd with Accessibility permission. Commands run through your shell, so $HOME works.
+f13 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py 10
