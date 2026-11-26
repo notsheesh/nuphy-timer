@@ -1,3 +1,24 @@
-# f13 (the remapped key) starts a 10 second timer; press it again to cancel.
-# Needs skhd with Accessibility permission. Commands run through your shell, so $HOME works.
-f13 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py 10
+# Air75 V3 green key (remapped to F13) -> typing mode -> side-light timer.
+# Type e.g. 30s / 30m / 1h then Enter. Esc or F13 cancels. See bar_timer.py in this repo
+
+:: timer @ : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py enter
+
+f13 ; timer
+timer < f13 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py cancel
+timer < f19 ; default
+timer < escape : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key escape
+timer < return : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key return
+timer < backspace : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key backspace
+timer < 0 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key 0
+timer < 1 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key 1
+timer < 2 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key 2
+timer < 3 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key 3
+timer < 4 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key 4
+timer < 5 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key 5
+timer < 6 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key 6
+timer < 7 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key 7
+timer < 8 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key 8
+timer < 9 : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key 9
+timer < s : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key s
+timer < m : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key m
+timer < h : $HOME/nuphy-timer/.venv/bin/python $HOME/nuphy-timer/bar_timer.py key h
