@@ -179,19 +179,55 @@ def restore(kb):
     kb.write_state(s)
 
 
+def safe_restore(kb):
+    """Restore the saved side-light settings; on failure retry on a fresh connection."""
+    try:
+        restore(kb)
+        return
+    except (Exception, SystemExit) as e:
+        print(f"restore failed ({e!r}), retrying", flush=True)
+    for _ in range(4):
+        time.sleep(0.5)
+        try:
+            k2 = Keyboard()
+            try:
+                restore(k2)
+            finally:
+                k2.close()
+            return
+        except (Exception, SystemExit):
+            continue
+    print("RESTORE FAILED: run `bar_timer.py restore`", flush=True)
+
+
+def pid_is_ours(pid):
+    """True only if pid is a live bar_timer.py process (guards against pid reuse)."""
+    try:
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True,
+                             text=True, timeout=2).stdout
+    except Exception:
+        return False
+    return "bar_timer.py" in out
+
+
 def running_pid():
     try:
         pid = int(PID_FILE.read_text())
-        os.kill(pid, 0)
-        return pid
-    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+    except (FileNotFoundError, ValueError):
         return None
+    if pid_is_ours(pid):
+        return pid
+    PID_FILE.unlink(missing_ok=True)              # stale file from a crash or reboot
+    return None
 
 
 def leave_mode():
     """Ask skhd to leave typing mode (it handles a synthesized F19 via `timer < f19 ; default`)."""
-    subprocess.run([SKHD, "-k", LEAVE_MODE_KEY], check=False,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.run([SKHD, "-k", LEAVE_MODE_KEY], check=False, timeout=5,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 class Cancelled(Exception):
@@ -219,16 +255,21 @@ def fill_timer(kb, seconds):
     print("timer done", flush=True)
 
 
-def listen_for_input(kb):
+def open_socket():
+    """Bound before the slow keyboard setup, so keys typed right away queue instead of getting lost."""
+    SOCK_FILE.unlink(missing_ok=True)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(SOCK_FILE))
+    srv.listen(16)
+    srv.setblocking(False)
+    return srv
+
+
+def listen_for_input(kb, srv):
     """Blink blue while collecting typed keys. Returns the typed text, or None if cancelled."""
     cur = bytearray(kb.state())
     cur[9], cur[10] = 5, 100
     kb.write_state(cur)
-    SOCK_FILE.unlink(missing_ok=True)
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(str(SOCK_FILE))
-    srv.listen(8)
-    srv.setblocking(False)
     sel = selectors.DefaultSelector()
     sel.register(srv, selectors.EVENT_READ)
     buf, lit = "", False
@@ -260,26 +301,29 @@ def listen_for_input(kb):
         return None                           # idle timeout
     finally:
         sel.close()
-        srv.close()
-        SOCK_FILE.unlink(missing_ok=True)
 
 
 def session(direct_seconds=None):
-    """One full session: [listen ->] timer. Owns the keyboard until done."""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    kb = Keyboard()
-    cur = kb.state()
-    if cur[9] != 5:                           # remember the user's real side-light setting
-        SIDE_FILE.write_text(bytes(cur[9:17]).hex())
-    PID_FILE.write_text(str(os.getpid()))
-    signal.signal(signal.SIGTERM, _raise_cancel)
+    """One full session: [listen ->] timer. Owns the keyboard until done.
+
+    Whatever goes wrong, the finally block restores the lights and, if the typing
+    mode is still active, leaves it (a stuck capture mode would swallow all typing)."""
+    in_input_phase = direct_seconds is None
+    kb = srv = None
+    signal.signal(signal.SIGTERM, _raise_cancel)      # handlers first: no unprotected window
     signal.signal(signal.SIGINT, _raise_cancel)
-    in_input_phase = False
     try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(str(os.getpid()))
+        if in_input_phase:
+            srv = open_socket()
+        kb = Keyboard()
+        cur = kb.state()
+        if cur[9] != 5:                       # remember the user's real side-light setting
+            SIDE_FILE.write_text(bytes(cur[9:17]).hex())
         seconds = direct_seconds
-        if seconds is None:
-            in_input_phase = True
-            typed = listen_for_input(kb)
+        if in_input_phase:
+            typed = listen_for_input(kb, srv)
             if typed is None:
                 print("input cancelled", flush=True)
                 return
@@ -290,17 +334,26 @@ def session(direct_seconds=None):
                 return
             print(f"accepted {typed!r} = {seconds}s", flush=True)
             blinks(kb, GREEN)                 # valid: one green blink, then the timer starts
-            in_input_phase = False
             leave_mode()
+            in_input_phase = False            # only after the mode is really left
         fill_timer(kb, seconds)
     except Cancelled:
         print("cancelled", flush=True)
+    except (Exception, SystemExit) as e:
+        print(f"error: {e!r}", flush=True)
     finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # cleanup must not be interrupted
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
-            restore(kb)
+            if kb is not None:
+                safe_restore(kb)
         finally:
+            if srv is not None:
+                srv.close()
+            SOCK_FILE.unlink(missing_ok=True)
             PID_FILE.unlink(missing_ok=True)
-            kb.close()
+            if kb is not None:
+                kb.close()
             if in_input_phase:
                 leave_mode()
 
@@ -312,26 +365,37 @@ def cmd_enter():
         os.kill(pid, signal.SIGTERM)
         leave_mode()
         return
-    log = open(STATE_DIR / "listener.log", "a") if STATE_DIR.exists() else subprocess.DEVNULL
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), "listen"],
-                     stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        log = open(STATE_DIR / "listener.log", "a")
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "listen"],
+                         stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+    except Exception:
+        leave_mode()                          # could not start: do not stay in typing mode
+        raise
 
 
 def cmd_key(name):
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.5)
-        s.connect(str(SOCK_FILE))
-        s.sendall(name.encode())
-        s.close()
-    except OSError:
-        pass                                  # no listener: ignore the key
+    """Forward a typed key to the listener. If no listener answers, leave typing mode."""
+    for _ in range(20):                       # the listener may still be starting: retry ~2 s
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect(str(SOCK_FILE))
+            s.sendall(name.encode())
+            s.close()
+            return
+        except OSError:
+            time.sleep(0.1)
+    leave_mode()                              # nobody is listening: do not trap the keyboard
 
 
 def cmd_cancel():
     pid = running_pid()
     if pid:
-        os.kill(pid, signal.SIGTERM)
+        os.kill(pid, signal.SIGTERM)          # the session leaves the mode itself
+    else:
+        leave_mode()                          # nothing to cancel: just get out of typing mode
 
 
 def main():
